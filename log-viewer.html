@@ -805,6 +805,7 @@
     });
     window.addEventListener("mouseup",function(){ if(dragging){ dragging=false; document.body.style.cursor=""; } });
   })();
+
   // ---------- list columns (built-in + user-defined root-level JSON fields) ----------
   function buildColHead(){
     var html=
@@ -995,6 +996,7 @@
       };
     });
   }
+
   // ---------- exchange (logbook request <-> response) ----------
   function nearestTo(list, r){
     var best=list[0], bd=Infinity;

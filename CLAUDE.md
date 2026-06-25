@@ -4,17 +4,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`log-viewer.html` is a single-file, **zero-dependency** viewer for ECS JSON-lines (ndjson) logs produced by Spring Boot (logback → ECS via `FormatterElastic`). It opens directly from `file://` — no build step, no server, no CDN/fetch/external scripts or fonts. All HTML, CSS, and vanilla JS live inline in the one file.
+`log-viewer.html` is a single-file, **zero-dependency** viewer for ECS JSON-lines (ndjson) logs produced by Spring Boot (logback → ECS via `FormatterElastic`). It opens directly from `file://` — no server, no CDN/fetch/external scripts or fonts. The shipped `log-viewer.html` is a **build artifact**: all HTML, CSS, and vanilla JS end up inlined in the one file.
+
+⚠️ **Do not hand-edit `log-viewer.html`** — it is generated. Edit the sources under `src/` and run `node build.js` to regenerate it. The output is still a single self-contained file with zero runtime dependencies; the build itself is plain Node (no npm packages).
 
 `acd.log` and `matrixkc.log` are real sample logs (kubectl-dumped ndjson) for manual testing. `exchange-panel-task.md` is a feature spec (in Russian) for an "Обмен" (request↔response pairing) panel — read it before touching exchange/correlation logic.
 
+## Sources & build
+
+- **`src/index.html`** — the HTML shell. Two markers get filled in by the build: `/*@build:styles@*/` inside `<style>`, and `/*@build:script@*/` inside the one IIFE. Edit the page markup, the `<body>`, and the `"use strict"` IIFE wrapper here.
+- **`src/styles.css`** — all CSS (everything that was inside `<style>`).
+- **`src/js/NN-*.js`** — the script body, split into ordered fragments (`05-state.js`, `10-field-extraction.js`, … `95-resizable-detail-panel.js`). They are concatenated **in filename order** into the *same* IIFE, so they share one closure (`ALL`, `VIEW`, `filters`, …) exactly as before — there are no ES modules, no imports/exports. Add a new section as `NN-name.js`; pick `NN` to place it in the right order. Match the existing ES5-style vanilla JS.
+- **`build.js`** — `node build.js` inlines `styles.css` and all `js/*.js` into `src/index.html` → `log-viewer.html`. Zero dependencies.
+
 ## Running & testing
 
-There is no build, lint, or test harness. To verify a change: open `log-viewer.html` in a browser and drag one of the sample `.log` files onto the page (or paste ndjson with Ctrl/Cmd+V, or use "open file…"). Check the browser console for errors — that is the only feedback loop.
+There is no lint or test harness. To verify a change: run `node build.js`, then open the regenerated `log-viewer.html` in a browser and drag one of the sample `.log` files onto the page (or paste ndjson with Ctrl/Cmd+V, or use "open file…"). Check the browser console for errors — that is the only feedback loop. The built `log-viewer.html` **is committed** so GitHub Pages serves it without a build step; always rebuild and commit it together with `src/` changes.
 
 ## Architecture
 
-Everything is inside one IIFE in the `<script>` block. The data flow:
+Everything is inside one IIFE in the `<script>` block (assembled from the `src/js/*.js` fragments — see *Sources & build* above). The data flow:
 
 - **`norm(raw, lineNo)`** — parses one ndjson line into a normalized record `{raw, parsed, level, msg, ts, tsMs, logger, thread, seq, traceId, hasErr, hay}`. Uses **`pick(o, [paths])`** to tolerate schema variation (e.g. `level` / `log.level` / `severity`). Unparseable lines become `level:"RAW"`. `hay` is a precomputed lowercase haystack for fast substring search.
 - **`ALL`** — array of all normalized records. **`VIEW`** — array of *indices into `ALL`* that pass the current filters. This `ALL`/`VIEW` indirection is central: row IDs (`idx`) are positions in `ALL`; `k` is a position in `VIEW`. Keep them straight.
