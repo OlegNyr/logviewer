@@ -1,0 +1,31 @@
+name: build-check
+
+# Verify that the committed log-viewer.html matches the sources in src/.
+# Fails if someone edited src/ (or the artifact) without running `node build.js`.
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  build-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Rebuild log-viewer.html from src/
+        run: node build.js
+
+      - name: Verify committed artifact is up to date
+        run: |
+          if ! git diff --quiet -- log-viewer.html; then
+            echo "::error::log-viewer.html is out of date — run 'node build.js' and commit the result."
+            git --no-pager diff -- log-viewer.html
+            exit 1
+          fi
+          echo "log-viewer.html is up to date with src/."
