@@ -1,0 +1,1392 @@
+<!doctype html>
+<!--
+  ACD / ECS log viewer — single-file, zero external dependencies.
+  Open with file:// . Drag a JSON-lines (ndjson) log onto the page, or paste it.
+  Built for Spring Boot ECS logs: @timestamp / level / logger / process.thread.name /
+  traceId / spanId / correlation / origin / operation / header.* / url / duration / error.stack_trace
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACD log viewer</title>
+<style>
+  :root{
+    /* cool graphite base — not pure black, slight blue undertone */
+    --bg:#11141a;
+    --bg-2:#161a22;
+    --bg-3:#1c212b;
+    --panel:#0d1016;
+    --line:#262d3a;
+    --line-soft:#1f2530;
+    --txt:#c9d2e0;
+    --txt-dim:#7c8699;
+    --txt-faint:#566073;
+    /* one signature accent: steel-teal, used only for interactive/trace */
+    --accent:#4cc7c0;
+    --accent-dim:#2b6b68;
+    /* semantic level colors */
+    --lv-debug:#6b7689;
+    --lv-info:#5aa9e6;
+    --lv-warn:#e0a64b;
+    --lv-error:#e5604d;
+    --lv-trace:#4a5160;
+    --lv-raw:#a06be0;
+    --hit:#3a3a16;
+    --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --row-h: 24px;
+    /* list column widths — drag the header cell borders to resize */
+    --c-seq:60px; --c-time:96px; --c-lvl:58px; --c-logger:200px; --c-thread:150px;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--bg);color:var(--txt);font-family:var(--sans);
+    font-size:13px;display:flex;flex-direction:column;overflow:hidden;
+  }
+  button{font-family:inherit;color:inherit;cursor:pointer}
+
+  /* ---------- toolbar ---------- */
+  .toolbar{
+    display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+    padding:7px 10px;background:var(--bg-2);border-bottom:1px solid var(--line);
+    flex:0 0 auto;
+  }
+  .brand{display:flex;align-items:baseline;gap:8px;margin-right:4px;user-select:none}
+  .brand b{font-weight:650;letter-spacing:.02em}
+  .brand span{color:var(--txt-faint);font-size:11px;font-family:var(--mono)}
+
+  .search{
+    flex:1 1 280px;min-width:200px;display:flex;align-items:center;gap:6px;
+    background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:0 8px;height:30px;
+  }
+  .search:focus-within{border-color:var(--accent-dim)}
+  .search svg{flex:0 0 auto;opacity:.55}
+  .search input{
+    flex:1;background:none;border:0;outline:0;color:var(--txt);font-size:13px;height:100%;
+    font-family:var(--mono);
+  }
+  .search input::placeholder{color:var(--txt-faint)}
+  .re-toggle{
+    font-family:var(--mono);font-size:11px;border:1px solid var(--line);background:var(--bg-3);
+    border-radius:4px;padding:2px 6px;color:var(--txt-dim);height:22px;
+  }
+  .re-toggle.on{color:var(--accent);border-color:var(--accent-dim);background:#13211f}
+
+  .levels{display:flex;gap:4px}
+
+  .timerange{display:flex;align-items:center;gap:4px}
+  .timerange input{
+    background:var(--panel);border:1px solid var(--line);border-radius:5px;color:var(--txt);
+    font-family:var(--mono);font-size:11px;height:30px;padding:0 6px;color-scheme:dark;
+  }
+  .timerange input:focus{outline:0;border-color:var(--accent-dim)}
+  .timerange input.on{border-color:var(--accent-dim);color:var(--accent)}
+  .timerange .arrow{color:var(--txt-faint);font-family:var(--mono);font-size:12px}
+  .timerange button{
+    border:1px solid var(--line);background:var(--bg-3);border-radius:5px;height:30px;width:26px;
+    color:var(--txt-dim);font-size:14px;line-height:1;
+  }
+  .timerange button:hover{color:var(--accent);border-color:var(--accent-dim)}
+  .lv-btn{
+    font-family:var(--mono);font-size:11px;border:1px solid var(--line);background:var(--bg-3);
+    border-radius:5px;padding:3px 7px;color:var(--txt-dim);height:30px;display:flex;align-items:center;gap:5px;
+    transition:opacity .1s;
+  }
+  .lv-btn .dot{width:7px;height:7px;border-radius:50%}
+  .lv-btn .cnt{color:var(--txt-faint);font-size:10px}
+  .lv-btn.off{opacity:.35;text-decoration:line-through}
+  .lv-btn[data-lv=DEBUG] .dot{background:var(--lv-debug)}
+  .lv-btn[data-lv=INFO]  .dot{background:var(--lv-info)}
+  .lv-btn[data-lv=WARN]  .dot{background:var(--lv-warn)}
+  .lv-btn[data-lv=ERROR] .dot{background:var(--lv-error)}
+  .lv-btn[data-lv=TRACE] .dot{background:var(--lv-trace)}
+
+  .tbtn{
+    border:1px solid var(--line);background:var(--bg-3);border-radius:5px;height:30px;padding:0 10px;
+    color:var(--txt-dim);font-size:12px;display:inline-flex;align-items:center;gap:6px;
+  }
+  .tbtn:hover{border-color:var(--accent-dim);color:var(--txt)}
+  .tbtn:disabled{opacity:.4;cursor:default}
+
+  /* active filter chips */
+  .chips{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{
+    display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;
+    background:#13211f;border:1px solid var(--accent-dim);color:var(--accent);border-radius:5px;
+    padding:3px 4px 3px 8px;height:26px;max-width:340px;
+  }
+  .chip .k{color:var(--txt-dim)}
+  .chip .v{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .chip button{border:0;background:none;color:var(--accent);opacity:.7;padding:0 2px;line-height:1}
+  .chip button:hover{opacity:1}
+  .chip.clickable{cursor:pointer}
+  .chip.clickable:hover{border-color:var(--accent)}
+  .chip.neg{background:#21161a;border-color:#5a2b30;color:var(--lv-error)}
+  .chip.neg button{color:var(--lv-error)}
+
+  /* ---------- main split ---------- */
+  .main{flex:1;display:flex;min-height:0}
+  .list-wrap{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--bg)}
+
+  .col-head{
+    display:flex;align-items:center;flex:0 0 auto;height:24px;
+    background:var(--bg-2);border-bottom:1px solid var(--line);
+    font-size:11px;color:var(--txt-faint);font-family:var(--mono);text-transform:uppercase;letter-spacing:.04em;
+    padding-right:10px;user-select:none;
+  }
+  .col-head>div{padding:0 8px;overflow:hidden;position:relative}
+  .c-seq{flex:0 0 var(--c-seq);text-align:right}
+  .c-time{flex:0 0 var(--c-time)}
+  .c-lvl{flex:0 0 var(--c-lvl)}
+  .c-logger{flex:0 0 var(--c-logger)}
+  .c-thread{flex:0 0 var(--c-thread)}
+  .c-msg{flex:1;min-width:0}
+  .col-rsz{position:absolute;top:0;right:-1px;width:7px;height:100%;cursor:col-resize;z-index:3}
+  .col-rsz:hover{background:var(--accent-dim)}
+  .col-x{position:absolute;top:0;right:7px;cursor:pointer;color:var(--txt-faint);padding:0 2px;z-index:2;font-size:12px;line-height:24px}
+  .col-x:hover{color:var(--lv-error)}
+  .cols-pop{position:fixed;z-index:60;background:var(--bg-3);border:1px solid var(--line);border-radius:7px;padding:6px;max-height:60vh;overflow:auto;min-width:210px;box-shadow:0 10px 28px rgba(0,0,0,.45)}
+  .cols-pop h5{margin:2px 6px 6px;font-family:var(--mono);font-size:11px;font-weight:600;color:var(--txt-faint);text-transform:uppercase;letter-spacing:.04em}
+  .cols-pop label{display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:5px;font-family:var(--mono);font-size:12px;color:var(--txt);cursor:pointer}
+  .cols-pop label:hover{background:var(--bg-2)}
+  .cols-pop input{accent-color:var(--accent)}
+
+  /* virtual list */
+  .vlist{flex:1;overflow-y:auto;overflow-x:hidden;position:relative;outline:none}
+  .vspacer{position:relative;width:100%}
+  .vrows{position:absolute;top:0;left:0;right:0}
+  .row{
+    display:flex;align-items:center;height:var(--row-h);font-family:var(--mono);font-size:12px;
+    border-bottom:1px solid var(--line-soft);cursor:pointer;white-space:nowrap;
+    border-left:2px solid transparent;
+  }
+  .row:hover{background:var(--bg-2)}
+  .row.sel{background:#15202b;border-left-color:var(--accent)}
+  .row.lv-WARN{border-left-color:var(--lv-warn)}
+  .row.lv-ERROR{border-left-color:var(--lv-error)}
+  .row.sel.lv-WARN,.row.sel.lv-ERROR{background:#15202b}
+  .row>div{padding:0 8px;overflow:hidden;text-overflow:ellipsis}
+  .row .c-seq{color:var(--txt-faint);text-align:right;font-size:11px}
+  .row .c-time{color:var(--txt-dim)}
+  .row .c-lvl{font-size:11px;font-weight:600}
+  .row.lv-DEBUG .c-lvl{color:var(--lv-debug)}
+  .row.lv-INFO  .c-lvl{color:var(--lv-info)}
+  .row.lv-WARN  .c-lvl{color:var(--lv-warn)}
+  .row.lv-ERROR .c-lvl{color:var(--lv-error)}
+  .row.lv-TRACE .c-lvl{color:var(--lv-trace)}
+  .row.lv-RAW   .c-lvl{color:var(--lv-raw)}
+  .row .c-logger{color:var(--txt-dim)}
+  .row .c-thread{color:var(--txt-faint)}
+  .row .c-msg{color:var(--txt)}
+  .row .c-msg mark{background:var(--hit);color:#ffe9a8;border-radius:2px;padding:0 1px}
+  .row .err-tag{color:var(--lv-error);font-weight:600}
+
+  /* ---------- detail panel ---------- */
+  .detail{
+    flex:0 0 460px;max-width:55vw;min-width:320px;background:var(--panel);
+    border-left:1px solid var(--line);display:flex;flex-direction:column;
+  }
+  .detail.hidden{display:none}
+  .dragbar{flex:0 0 5px;cursor:col-resize;background:transparent;margin-left:-3px;position:relative;z-index:5}
+  .dragbar:hover{background:var(--accent-dim)}
+  .d-head{
+    flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:8px 10px;
+    border-bottom:1px solid var(--line);background:var(--bg-2);
+  }
+  .d-head .lvl-badge{font-family:var(--mono);font-size:11px;font-weight:700;padding:2px 7px;border-radius:4px}
+  .badge-DEBUG{color:var(--lv-debug);background:#1b212c}
+  .badge-INFO {color:var(--lv-info);background:#10243a}
+  .badge-WARN {color:var(--lv-warn);background:#2a2110}
+  .badge-ERROR{color:var(--lv-error);background:#2a1512}
+  .badge-TRACE{color:var(--lv-trace);background:#1b212c}
+  .badge-RAW  {color:var(--lv-raw);background:#1e1430}
+  .d-head .d-seq{margin-left:auto;color:var(--txt-faint);font-family:var(--mono);font-size:11px}
+  .d-head .x{border:0;background:none;color:var(--txt-dim);font-size:18px;line-height:1;padding:0 4px}
+  .d-head .x:hover{color:var(--txt)}
+  .d-body{flex:1;overflow-y:auto;padding:10px 12px 40px}
+
+  .d-time{font-family:var(--mono);font-size:12px;color:var(--txt);margin-bottom:2px}
+  .d-time small{color:var(--txt-faint)}
+  .d-msg{
+    font-family:var(--mono);font-size:12.5px;line-height:1.5;color:#dfe7f2;white-space:pre-wrap;
+    word-break:break-word;margin:8px 0 12px;padding:8px 10px;background:var(--bg-2);border-radius:6px;
+    border:1px solid var(--line-soft);
+  }
+  .sect-h{
+    font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--txt-faint);
+    margin:14px 0 6px;font-family:var(--mono);
+  }
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-family:var(--mono);font-size:12px}
+  .kv .k{color:var(--txt-dim);white-space:nowrap}
+  .kv .v{color:var(--txt);word-break:break-all}
+  .kv .v.click{color:var(--accent);cursor:pointer;text-decoration:underline dotted var(--accent-dim)}
+  .kv .v.click:hover{text-decoration-style:solid}
+  .kv-f{margin-left:6px;border:1px solid var(--line);background:var(--bg-3);color:var(--txt-dim);border-radius:3px;font-family:var(--mono);font-size:10px;line-height:1;padding:1px 4px;cursor:pointer;vertical-align:middle;opacity:0;transition:opacity .1s}
+  .kv .v:hover .kv-f{opacity:1}
+  .kv-f:hover{color:var(--accent);border-color:var(--accent-dim)}
+  .stack{
+    font-family:var(--mono);font-size:11.5px;line-height:1.5;color:#d8b6ad;white-space:pre;
+    overflow-x:auto;background:#1a1210;border:1px solid #3a201c;border-radius:6px;padding:8px 10px;margin-top:4px;
+  }
+  .stack .at{color:var(--txt-faint)}
+  .raw{
+    font-family:var(--mono);font-size:11.5px;line-height:1.5;color:var(--txt-dim);white-space:pre;
+    overflow-x:auto;background:var(--bg-2);border:1px solid var(--line-soft);border-radius:6px;padding:8px 10px;
+  }
+  .raw .jk{color:#7fa8d8}.raw .js{color:#9bcf8a}.raw .jn{color:#d8a05a}.raw .jb{color:#c07fd8}
+  .mini{font-size:11px;color:var(--txt-faint);font-family:var(--mono)}
+  .copy{
+    float:right;border:1px solid var(--line);background:var(--bg-3);border-radius:4px;
+    font-size:10px;color:var(--txt-dim);padding:1px 6px;font-family:var(--mono);
+  }
+  .copy:hover{color:var(--accent);border-color:var(--accent-dim)}
+
+  /* ---------- exchange (logbook request/response pair) ---------- */
+  .xchg{margin:0 0 12px;border:1px solid var(--line);border-radius:7px;background:var(--bg-2);overflow:hidden}
+  .xchg-head{display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--bg-3);border-bottom:1px solid var(--line);font-family:var(--mono);font-size:11px}
+  .xchg-dir{font-weight:700;letter-spacing:.02em;color:var(--accent);margin-right:auto}
+  .xchg-dir.out{color:var(--lv-warn)}
+  .xchg-lat{color:var(--txt-dim)}
+  .xchg-iso{border:1px solid var(--line);background:var(--bg-2);border-radius:4px;color:var(--txt-dim);font-family:var(--mono);font-size:10px;padding:2px 7px;height:20px}
+  .xchg-iso:hover{color:var(--accent);border-color:var(--accent-dim)}
+  .xchg-cards{display:flex;flex-direction:column;gap:8px;padding:8px}
+  .xchg-card{border:1px solid var(--line-soft);border-radius:6px;background:var(--panel);padding:6px 8px}
+  .xchg-card.cur{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent-dim)}
+  .xchg-card .ttl{font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--txt-faint);margin-bottom:5px}
+  .xchg-card.cur .ttl{color:var(--accent)}
+  .xchg-meta{font-family:var(--mono);font-size:11px;color:var(--txt);word-break:break-all;margin-bottom:4px}
+  .xchg-meta .k{color:var(--txt-faint)}
+  .xchg-bodytext{font-family:var(--mono);font-size:11.5px;line-height:1.45;color:#dfe7f2;white-space:pre-wrap;word-break:break-word;max-height:170px;overflow:auto;background:var(--bg);border:1px solid var(--line-soft);border-radius:5px;padding:6px 8px}
+  .xchg-note{font-family:var(--mono);font-size:11px;color:var(--lv-warn)}
+  .xchg-nav{display:flex;gap:6px;padding:0 8px 8px}
+  .xchg-nav button{flex:1;border:1px solid var(--line);background:var(--bg-3);border-radius:5px;height:28px;color:var(--txt-dim);font-size:12px;font-family:var(--mono)}
+  .xchg-nav button:hover:not(:disabled){border-color:var(--accent-dim);color:var(--txt)}
+  .xchg-nav button:disabled{opacity:.45;cursor:default}
+
+  /* ---------- timeline (trace spans) ---------- */
+  .timeline{flex:0 0 auto;position:relative;height:96px;background:var(--bg);user-select:none;overflow:hidden}
+  .tl-scroll{position:absolute;left:0;right:0;top:0;bottom:16px;overflow-y:auto;overflow-x:hidden}
+  .tl-lanes{position:relative;min-height:100%}
+  .tl-span{position:absolute;height:9px;min-width:2px;border-radius:3px;background:var(--accent-dim);border:1px solid var(--accent);cursor:pointer;box-sizing:border-box;z-index:2}
+  .tl-span.span{background:#3a2b5e;border-color:var(--lv-raw)}   /* spanId granularity */
+  .tl-span.rec{background:#1d3a55;border-color:var(--lv-info)}  /* per-record granularity */
+  .tl-span.err{background:#4a2024;border-color:var(--lv-error)}
+  .tl-span.sel{background:var(--accent);border-color:#dffefe}
+  .tl-span:hover{filter:brightness(1.35)}
+  .tl-axis{position:absolute;left:0;right:0;bottom:0;height:16px;display:flex;justify-content:space-between;align-items:center;padding:0 8px;background:var(--bg-2);border-top:1px solid var(--line-soft);font-family:var(--mono);font-size:10px;color:var(--txt-faint)}
+  .tl-sel{position:absolute;top:0;bottom:16px;background:rgba(76,199,192,.14);border-left:1px solid var(--accent);border-right:1px solid var(--accent);pointer-events:none;z-index:4}
+  .tl-band{position:absolute;top:0;height:100%;background:rgba(76,199,192,.12);border-left:1px solid var(--accent-dim);border-right:1px solid var(--accent-dim);pointer-events:none;z-index:1;display:none}
+  .tl-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:11px;color:var(--txt-faint)}
+  .tl-resize{flex:0 0 5px;cursor:ns-resize;background:var(--bg-2);border-bottom:1px solid var(--line);position:relative;z-index:5}
+  .tl-resize:hover{background:var(--accent-dim)}
+
+  /* ---------- status bar ---------- */
+  .status{
+    flex:0 0 auto;display:flex;align-items:center;gap:14px;height:24px;padding:0 12px;
+    background:var(--bg-2);border-top:1px solid var(--line);font-family:var(--mono);
+    font-size:11px;color:var(--txt-faint);overflow:hidden;white-space:nowrap;
+  }
+  .status b{color:var(--txt-dim);font-weight:600}
+  .status .sep{color:var(--line)}
+  .status .s-info{color:var(--lv-info)}
+  .status .s-debug{color:var(--lv-debug)}
+  .status .s-warn{color:var(--lv-warn)}
+  .status .s-error{color:var(--lv-error)}
+
+  /* ---------- empty / drop state ---------- */
+  .drop{
+    position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;
+    gap:14px;background:var(--bg);z-index:20;text-align:center;padding:24px;
+  }
+  .drop.dragover{background:#12201f;outline:2px dashed var(--accent-dim);outline-offset:-12px}
+  .drop h1{font-size:18px;font-weight:600;margin:0;color:var(--txt)}
+  .drop p{margin:0;color:var(--txt-dim);max-width:520px;line-height:1.6}
+  .drop .glyph{font-family:var(--mono);font-size:40px;color:var(--accent);opacity:.8}
+  .drop code{font-family:var(--mono);background:var(--bg-3);padding:2px 6px;border-radius:4px;color:var(--accent);font-size:12px}
+  .drop .btn-open{
+    border:1px solid var(--accent-dim);background:#13211f;color:var(--accent);border-radius:7px;
+    padding:9px 18px;font-size:13px;
+  }
+  .drop .btn-open:hover{background:#16302d}
+  .drop .hint{font-size:11px;color:var(--txt-faint);font-family:var(--mono)}
+
+  .toast{
+    position:fixed;bottom:34px;left:50%;transform:translateX(-50%);
+    background:var(--bg-3);border:1px solid var(--accent-dim);color:var(--accent);
+    padding:7px 14px;border-radius:7px;font-family:var(--mono);font-size:12px;z-index:50;
+    opacity:0;transition:opacity .15s;pointer-events:none;
+  }
+  .toast.show{opacity:1}
+  input[type=file]{display:none}
+  ::-webkit-scrollbar{width:11px;height:11px}
+  ::-webkit-scrollbar-thumb{background:#2b3340;border-radius:6px;border:2px solid var(--panel)}
+  ::-webkit-scrollbar-track{background:transparent}
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <div class="brand"><b>acd·log</b><span id="fileName">no file</span></div>
+  <div class="timerange" id="timerange" title="Показать только записи во временном интервале">
+    <input type="datetime-local" id="tFrom" title="от">
+    <span class="arrow">→</span>
+    <input type="datetime-local" id="tTo" title="до">
+    <button id="tClear" title="Сбросить интервал">×</button>
+  </div>
+  <div class="search">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+    <input id="q" type="text" placeholder="filter… (substring across all fields)" spellcheck="false" autocomplete="off">
+    <button class="re-toggle" id="reToggle" title="Treat query as a regular expression">.*</button>
+  </div>
+  <div class="levels" id="levels"></div>
+  <button class="tbtn" id="prevHit" title="Previous WARN/ERROR (Shift+P)">▲ issue</button>
+  <button class="tbtn" id="nextHit" title="Next WARN/ERROR (Shift+N)">issue ▼</button>
+  <button class="tbtn" id="colsBtn" title="Колонки из полей JSON корневого уровня">колонки</button>
+  <button class="tbtn" id="exportBtn" title="Download the currently filtered rows as ndjson">export</button>
+  <button class="tbtn" id="openBtn">open file…</button>
+  <input type="file" id="fileInput" accept=".log,.json,.ndjson,.txt,.jsonl" multiple>
+</div>
+
+<div class="toolbar" id="chipBar" style="display:none;border-top:0;padding-top:0;padding-bottom:7px;background:var(--bg-2)">
+  <div class="chips" id="chips"></div>
+</div>
+
+<div class="timeline" id="timeline" style="display:none" title="Спаны трейсов. Клик — перейти к трейсу. Протяни мышью — задать интервал."></div>
+<div class="tl-resize" id="tlResize" style="display:none" title="Потяни, чтобы изменить высоту шкалы"></div>
+
+<div class="main">
+  <div class="list-wrap">
+    <div class="col-head" id="colHead">
+      <div class="c-seq">#<span class="col-rsz" data-col="seq"></span></div>
+      <div class="c-time">time<span class="col-rsz" data-col="time"></span></div>
+      <div class="c-lvl">level<span class="col-rsz" data-col="lvl"></span></div>
+      <div class="c-logger">logger<span class="col-rsz" data-col="logger"></span></div>
+      <div class="c-thread">thread<span class="col-rsz" data-col="thread"></span></div>
+      <div class="c-msg">message</div>
+    </div>
+    <div class="vlist" id="vlist" tabindex="0">
+      <div class="vspacer" id="vspacer"><div class="vrows" id="vrows"></div></div>
+      <div class="drop" id="drop">
+        <div class="glyph">{ }</div>
+        <h1>Drop a log file here</h1>
+        <p>JSON-lines / ndjson straight from Kubernetes. Nothing leaves your machine — this page makes no network requests.</p>
+        <button class="btn-open" id="dropOpen">Open file…</button>
+        <p class="hint">…or paste with Ctrl/Cmd+V &nbsp;·&nbsp; e.g. <code>kubectl logs deploy/acd --tail=5000 &gt; acd.log</code></p>
+      </div>
+    </div>
+  </div>
+
+  <div class="dragbar" id="dragbar"></div>
+  <div class="detail hidden" id="detail">
+    <div class="d-head">
+      <span class="lvl-badge" id="dLevel"></span>
+      <span class="mini" id="dLogger"></span>
+      <span class="d-seq" id="dSeq"></span>
+      <button class="x" id="dClose" title="Close (Esc)">×</button>
+    </div>
+    <div class="d-body" id="dBody"></div>
+  </div>
+</div>
+
+<div class="status" id="status">
+  <span>drop a file to begin</span>
+</div>
+
+<div class="toast" id="toast"></div>
+<div class="cols-pop" id="colsPop" style="display:none"></div>
+
+<script>
+"use strict";
+(function(){
+  // ---------- state ----------
+  var ALL = [];            // parsed records
+  var VIEW = [];           // filtered indices into ALL
+  var corrIndex = new Map(); // correlation -> [indices into ALL] (logbook request/response pairs)
+  var tlRange = null;        // {t0,t1} ms range currently drawn on the timeline (for drag->interval)
+  var LANE_H = 12;           // px per timeline lane (9px bar + gap)
+  var tlField = "traceId";   // current timeline grouping field: traceId | spanId | __idx (adaptive)
+  var customCols = [];       // user-added columns: [{key, var}] from root-level JSON fields
+  var ccSeq = 0;             // counter for stable per-custom-column CSS var names (--cc-N)
+  var COL_EXCLUDE = { "sequenceNumber":1, "@timestamp":1, "level":1, "logger":1, "message":1 }; // already shown by built-ins
+  var ROW_H = 24;
+  var BUF = 8;             // virtual list overscan
+  var selected = -1;       // index into ALL
+  var LEVEL_ORDER = ["ERROR","WARN","INFO","DEBUG","TRACE","RAW"];
+  var levelOn = {ERROR:true,WARN:true,INFO:true,DEBUG:true,TRACE:true,RAW:true};
+  var filters = { q:"", regex:false, logger:null, loggerNeg:false, thread:null, trace:null, correlation:null, tsFrom:null, tsTo:null, fields:[] };
+
+  var $ = function(id){return document.getElementById(id)};
+  var vlist=$("vlist"), vspacer=$("vspacer"), vrows=$("vrows"),
+      drop=$("drop"), detail=$("detail"), status=$("status");
+
+  // ---------- field extraction (tolerant to schema variations) ----------
+  function pick(o, paths){
+    for(var i=0;i<paths.length;i++){
+      var parts=paths[i].split("."), v=o, ok=true;
+      for(var j=0;j<parts.length;j++){ if(v&&typeof v==="object"&&parts[j] in v){v=v[parts[j]];}else{ok=false;break;} }
+      if(ok && v!==undefined && v!==null) return v;
+    }
+    return undefined;
+  }
+  function norm(raw, lineNo){
+    var o;
+    try{ o=JSON.parse(raw); }catch(e){ return {raw:raw,parsed:null,level:"RAW",msg:raw,ts:"",tsMs:NaN,logger:"",thread:"",seq:lineNo}; }
+    if(typeof o!=="object"||o===null) return {raw:raw,parsed:null,level:"RAW",msg:String(o),ts:"",tsMs:NaN,logger:"",thread:"",seq:lineNo};
+    var lvl = String(pick(o,["level","log.level","severity"])||"INFO").toUpperCase();
+    if(LEVEL_ORDER.indexOf(lvl)<0) lvl = (lvl==="WARNING"?"WARN":"INFO");
+    var ts  = pick(o,["@timestamp","timestamp","time","ts"]) || "";
+    var tsMs = ts? Date.parse(ts) : NaN;
+    var logger = pick(o,["logger","logger_name","log.logger"]) || "";
+    var thread = pick(o,["process.thread.name","thread.name","thread_name","thread"]) || "";
+    var msg = pick(o,["message","msg"]); if(msg===undefined) msg="";
+    return {
+      raw:raw, parsed:o, level:lvl, msg:String(msg), ts:String(ts), tsMs:tsMs,
+      logger:String(logger), thread:String(thread),
+      seq: (o.sequenceNumber!==undefined? o.sequenceNumber : lineNo),
+      traceId: pick(o,["traceId","trace.id","trace_id"]),
+      spanId: pick(o,["spanId","span.id","span_id"]),
+      // logbook exchange context — MDC fields are flat at root (correlation/origin/operation),
+      // url/duration arrive as KeyValuePairs (stringified, so duration is a string like "58").
+      correlation: pick(o,["correlation"]),
+      origin: pick(o,["origin"]),
+      operation: pick(o,["operation"]),
+      url: pick(o,["url"]),
+      duration: pick(o,["duration"]),
+      hasErr: !!(o.error || lvl==="ERROR"),
+      // precomputed lowercase haystack for fast substring search
+      hay: raw.toLowerCase()
+    };
+  }
+
+  // ---------- loading ----------
+  function loadText(text, name){
+    var lines = text.split(/\r?\n/);
+    var recs=[];
+    for(var i=0;i<lines.length;i++){
+      var ln=lines[i]; if(ln.trim()==="") continue;
+      recs.push(norm(ln, recs.length+1));
+    }
+    ALL = recs;
+    corrIndex = new Map();
+    for(var ci=0; ci<ALL.length; ci++){
+      var cc = ALL[ci].correlation;
+      if(cc){ var arr=corrIndex.get(cc); if(!arr){ arr=[]; corrIndex.set(cc,arr); } arr.push(ci); }
+    }
+    selected = -1; detail.classList.add("hidden");
+    $("fileName").textContent = name + "  ·  " + recs.length + " lines";
+    drop.style.display="none";
+    $("timeline").style.display=""; $("tlResize").style.display="";
+    setupTimeBounds();
+    buildLevelButtons();
+    applyFilters();
+    toast("Loaded "+recs.length+" lines");
+  }
+  function loadFiles(fileList){
+    var files=Array.prototype.slice.call(fileList);
+    if(!files.length) return;
+    var readers = files.map(function(f){
+      return new Promise(function(res){
+        var r=new FileReader();
+        r.onload=function(){res({name:f.name,text:String(r.result)});};
+        r.onerror=function(){res({name:f.name,text:""});};
+        r.readAsText(f);
+      });
+    });
+    Promise.all(readers).then(function(parts){
+      var text = parts.map(function(p){return p.text;}).join("\n");
+      var name = parts.length===1? parts[0].name : parts.length+" files";
+      loadText(text, name);
+    });
+  }
+
+  // ---------- level buttons ----------
+  function buildLevelButtons(){
+    var counts={}; LEVEL_ORDER.forEach(function(l){counts[l]=0;});
+    ALL.forEach(function(r){ counts[r.level]=(counts[r.level]||0)+1; });
+    var box=$("levels"); box.innerHTML="";
+    LEVEL_ORDER.forEach(function(l){
+      if(!counts[l] && l!=="ERROR") return; // hide empty (keep ERROR always visible)
+      var b=document.createElement("button");
+      b.className="lv-btn"+(levelOn[l]?"":" off"); b.dataset.lv=l;
+      b.innerHTML='<span class="dot"></span>'+l+'<span class="cnt">'+(counts[l]||0)+'</span>';
+      b.onclick=function(){ levelOn[l]=!levelOn[l]; b.classList.toggle("off",!levelOn[l]); applyFilters(); };
+      box.appendChild(b);
+    });
+  }
+
+  // ---------- filtering ----------
+  function compileQuery(){
+    var q=filters.q.trim();
+    if(!q) return null;
+    if(filters.regex){
+      try{ return {re:new RegExp(q,"i")}; }catch(e){ return {bad:true}; }
+    }
+    return {sub:q.toLowerCase()};
+  }
+  function applyFilters(){
+    var qc=compileQuery();
+    $("q").style.color = (qc&&qc.bad)? "var(--lv-error)":"var(--txt)";
+    VIEW=[];
+    for(var i=0;i<ALL.length;i++){
+      var r=ALL[i];
+      if(!levelOn[r.level]) continue;
+      if(filters.tsFrom!=null || filters.tsTo!=null){
+        if(isNaN(r.tsMs)) continue; // can't place a record without a parseable timestamp in the interval
+        if(filters.tsFrom!=null && r.tsMs<filters.tsFrom) continue;
+        if(filters.tsTo!=null && r.tsMs>filters.tsTo) continue;
+      }
+      if(filters.correlation && r.correlation!==filters.correlation) continue;
+      if(filters.trace && r.traceId!==filters.trace) continue;
+      if(filters.logger){
+        var match = r.logger===filters.logger;
+        if(filters.loggerNeg? match : !match) continue;
+      }
+      if(filters.thread && r.thread!==filters.thread) continue;
+      if(filters.fields.length){
+        var fpass=true;
+        for(var fi=0; fi<filters.fields.length; fi++){
+          var ff=filters.fields[fi], got=fieldValue(r, ff.path);
+          var emptyVal=(got===undefined||got===null||got===""), ok;
+          if(ff.op==="empty") ok=emptyVal;
+          else if(ff.op==="nonempty") ok=!emptyVal;
+          else if(ff.op==="ne") ok=String(got)!==ff.val;
+          else ok=String(got)===ff.val;
+          if(!ok){ fpass=false; break; }
+        }
+        if(!fpass) continue;
+      }
+      if(qc){
+        if(qc.bad) {/* show all on bad regex */}
+        else if(qc.sub){ if(r.hay.indexOf(qc.sub)<0) continue; }
+        else if(qc.re){ if(!qc.re.test(r.raw)) continue; }
+      }
+      VIEW.push(i);
+    }
+    renderChips();
+    renderStatus();
+    renderVirtual(true);
+    renderTimeline();
+  }
+
+  // ---------- chips ----------
+  function renderChips(){
+    var bar=$("chipBar"), box=$("chips"); box.innerHTML="";
+    var any=false;
+    function chip(k,v,neg,onClear){
+      any=true;
+      var c=document.createElement("span"); c.className="chip"+(neg?" neg":"");
+      c.innerHTML='<span class="k">'+k+'</span><span class="v" title="'+esc(v)+'">'+esc(v)+'</span>';
+      var x=document.createElement("button"); x.textContent="×"; x.onclick=onClear; c.appendChild(x);
+      box.appendChild(c);
+    }
+    if(filters.tsFrom!=null || filters.tsTo!=null){
+      var from = filters.tsFrom!=null? fmtMs(filters.tsFrom) : "…";
+      var to   = filters.tsTo!=null?   fmtMs(filters.tsTo)   : "…";
+      chip("интервал", from+" → "+to, false, clearTimeFilter);
+    }
+    if(filters.correlation) chip("обмен", filters.correlation, false, function(){filters.correlation=null;applyFilters();});
+    if(filters.trace) chip("trace", filters.trace, false, function(){filters.trace=null;applyFilters();});
+    if(filters.logger) chip(filters.loggerNeg?"logger ≠":"logger", shortLogger(filters.logger), filters.loggerNeg, function(){filters.logger=null;applyFilters();});
+    if(filters.thread) chip("thread", filters.thread, false, function(){filters.thread=null;applyFilters();});
+    filters.fields.forEach(function(f){
+      any=true;
+      var neg=(f.op==="ne"||f.op==="empty");
+      var opSym=f.op==="ne"?" ≠":f.op==="eq"?" =":"";
+      var valTxt=f.op==="empty"?"(пусто)":f.op==="nonempty"?"(непусто)":f.val;
+      var c=document.createElement("span"); c.className="chip clickable"+(neg?" neg":"");
+      c.title="клик — сменить условие: = / ≠ / пусто / непусто";
+      c.innerHTML='<span class="k">'+esc(f.label)+opSym+'</span><span class="v" title="'+esc(valTxt)+'">'+esc(valTxt)+'</span>';
+      c.onclick=(function(ff){ return function(){ cycleFieldOp(ff); }; })(f);
+      var x=document.createElement("button"); x.textContent="×";
+      x.onclick=(function(ff){ return function(e){ e.stopPropagation(); filters.fields=filters.fields.filter(function(z){return z!==ff;}); applyFilters(); }; })(f);
+      c.appendChild(x);
+      box.appendChild(c);
+    });
+    bar.style.display = any? "flex":"none";
+  }
+
+  // ---------- status ----------
+  function renderStatus(){
+    var c={ERROR:0,WARN:0,INFO:0,DEBUG:0,TRACE:0,RAW:0};
+    for(var i=0;i<VIEW.length;i++) c[ALL[VIEW[i]].level]++;
+    var first=VIEW.length?ALL[VIEW[0]]:null, last=VIEW.length?ALL[VIEW[VIEW.length-1]]:null;
+    var range="";
+    if(first&&last&&first.ts&&last.ts) range = fmtTime(first)+" → "+fmtTime(last);
+    status.innerHTML =
+      '<span><b>'+VIEW.length.toLocaleString()+'</b> shown</span><span class="sep">·</span>'+
+      '<span>'+ALL.length.toLocaleString()+' total</span><span class="sep">·</span>'+
+      (c.ERROR?'<span class="s-error">'+c.ERROR+' ERR</span> ':'')+
+      (c.WARN?'<span class="s-warn">'+c.WARN+' WARN</span> ':'')+
+      '<span class="s-info">'+c.INFO+' INFO</span> '+
+      '<span class="s-debug">'+c.DEBUG+' DEBUG</span>'+
+      (range? '<span class="sep">·</span><span>'+range+'</span>':'');
+  }
+
+  // ---------- virtual list ----------
+  function renderVirtual(reset){
+    vspacer.style.height = (VIEW.length*ROW_H)+"px";
+    if(reset){
+      var maxTop=Math.max(0, VIEW.length*ROW_H - vlist.clientHeight);
+      if(vlist.scrollTop>maxTop) vlist.scrollTop=maxTop;
+    }
+    var scrollTop=vlist.scrollTop, h=vlist.clientHeight;
+    var start=Math.max(0, Math.floor(scrollTop/ROW_H)-BUF);
+    var end=Math.min(VIEW.length, Math.ceil((scrollTop+h)/ROW_H)+BUF);
+    vrows.style.transform="translateY("+(start*ROW_H)+"px)";
+    var qc=compileQuery();
+    var html="";
+    for(var k=start;k<end;k++){
+      var idx=VIEW[k], r=ALL[idx];
+      var cls="row lv-"+r.level+(idx===selected?" sel":"");
+      var msg = r.hasErr && r.parsed && r.parsed.error
+        ? '<span class="err-tag">['+esc(shortType(r.parsed.error.type))+'] </span>'+hl(r.msg,qc)
+        : hl(r.msg, qc);
+      var custom="";
+      for(var ci=0; ci<customCols.length; ci++){
+        var cv=cellValue(r, customCols[ci].path);
+        custom+='<div class="c-custom" style="flex:0 0 var('+customCols[ci].var+')" title="'+esc(cv)+'">'+esc(cv)+'</div>';
+      }
+      html+='<div class="'+cls+'" data-i="'+idx+'">'+
+        '<div class="c-seq">'+r.seq+'</div>'+
+        '<div class="c-time">'+fmtTime(r)+'</div>'+
+        '<div class="c-lvl">'+r.level+'</div>'+
+        '<div class="c-logger" title="'+esc(r.logger)+'">'+esc(shortLogger(r.logger))+'</div>'+
+        '<div class="c-thread" title="'+esc(r.thread)+'">'+esc(r.thread)+'</div>'+
+        custom+
+        '<div class="c-msg">'+msg+'</div>'+
+      '</div>';
+    }
+    vrows.innerHTML=html;
+  }
+  vlist.addEventListener("scroll", function(){ renderVirtual(false); });
+  window.addEventListener("resize", function(){ renderVirtual(false); });
+  vrows.addEventListener("click", function(e){
+    var row=e.target.closest(".row"); if(!row) return;
+    selectRow(parseInt(row.dataset.i,10));
+  });
+
+  // ---------- timeline (trace spans) ----------
+  function shortTrace(t){ return t && t.length>10 ? t.slice(0,10)+"…" : (t||""); }
+  function tlKeyOf(idx){ // grouping key for a record under the current granularity
+    if(tlField==="__idx") return "#"+idx;
+    var v=ALL[idx][tlField];
+    return (v!=null && v!=="") ? String(v) : "#"+idx;
+  }
+  function renderTimeline(){
+    var box=$("timeline");
+    // adaptive granularity: many traces -> per trace; a single trace -> per span; a single span -> per record
+    var traces=new Set(), spans=new Set();
+    for(var i=0;i<VIEW.length;i++){
+      var rr=ALL[VIEW[i]]; if(isNaN(rr.tsMs)) continue;
+      if(rr.traceId) traces.add(rr.traceId);
+      if(rr.spanId)  spans.add(rr.spanId);
+    }
+    var unitLabel;
+    if(traces.size>1){ tlField="traceId"; unitLabel="трейсов"; }
+    else if(spans.size>1){ tlField="spanId"; unitLabel="спанов"; }
+    else { tlField="__idx"; unitLabel="записей"; }
+
+    // group the current VIEW by the chosen key -> {min,max,count,err,minIdx}
+    var map=new Map();
+    for(var j=0;j<VIEW.length;j++){
+      var idx=VIEW[j], r=ALL[idx];
+      if(isNaN(r.tsMs)) continue;
+      var key=tlKeyOf(idx), s=map.get(key);
+      if(!s){ map.set(key,{key:key,min:r.tsMs,max:r.tsMs,minIdx:idx,count:1,err:(r.level==="ERROR"||r.hasErr)}); }
+      else{
+        s.count++;
+        if(r.tsMs<s.min){ s.min=r.tsMs; s.minIdx=idx; }
+        if(r.tsMs>s.max){ s.max=r.tsMs; }
+        if(r.level==="ERROR"||r.hasErr) s.err=true;
+      }
+    }
+    var arr=[]; map.forEach(function(s){ arr.push(s); });
+    if(!arr.length){ box.innerHTML='<div class="tl-empty">нет записей с временной меткой в выборке</div>'; tlRange=null; return; }
+    var t0=Infinity, t1=-Infinity;
+    arr.forEach(function(s){ if(s.min<t0)t0=s.min; if(s.max>t1)t1=s.max; });
+    if(t1<=t0) t1=t0+1;
+    tlRange={t0:t0,t1:t1};
+    var range=t1-t0, gap=range*0.004;
+    // greedy lane packing (earliest-start first; a span reuses a lane whose previous span ended)
+    arr.sort(function(a,b){ return a.min-b.min; });
+    var laneEnds=[];
+    arr.forEach(function(s){
+      var lane=-1;
+      for(var l=0;l<laneEnds.length;l++){ if(s.min>=laneEnds[l]){ lane=l; break; } }
+      if(lane<0){ lane=laneEnds.length; laneEnds.push(0); }
+      laneEnds[lane]=s.max+gap; s.lane=lane;
+    });
+    var lanes=laneEnds.length;
+    var selKey = selected>=0 ? tlKeyOf(selected) : null;
+    var html='<div class="tl-scroll"><div class="tl-lanes" style="height:'+(lanes*LANE_H+4)+'px">';
+    html+='<div class="tl-band"></div>'; // background highlight behind the active span
+    arr.forEach(function(s){
+      var left=(s.min-t0)/range*100, w=(s.max-s.min)/range*100, dur=s.max-s.min;
+      var gcls = tlField==="spanId" ? " span" : tlField==="__idx" ? " rec" : "";
+      var cls="tl-span"+gcls+(s.err?" err":"")+(s.key===selKey?" sel":"");
+      var name = tlField==="traceId" ? ("трейс "+shortTrace(s.key))
+               : tlField==="spanId"  ? ("спан "+shortTrace(s.key))
+               : ("запись #"+ALL[s.minIdx].seq);
+      var title=name+" · "+s.count+" зап. · "+dur+" ms · "+fmtMs(s.min)+"→"+fmtMs(s.max);
+      html+='<div class="'+cls+'" data-idx="'+s.minIdx+'" data-key="'+esc(s.key)+'" title="'+esc(title)+'" '+
+            'style="left:'+left.toFixed(3)+'%;width:'+w.toFixed(3)+'%;top:'+(s.lane*LANE_H)+'px"></div>';
+    });
+    html+='</div></div>';
+    html+='<div class="tl-axis"><span>'+fmtMs(t0)+'</span><span>'+arr.length+' '+unitLabel+' · '+lanes+' дорожек</span><span>'+fmtMs(t1)+'</span></div>';
+    box.innerHTML=html;
+    positionBand();
+  }
+  function positionBand(){ // the highlight band mirrors the currently selected span's left/width
+    var box=$("timeline"), band=box.querySelector(".tl-band");
+    if(!band) return;
+    var sel=box.querySelector(".tl-span.sel");
+    if(sel){ band.style.left=sel.style.left; band.style.width=sel.style.width; band.style.display="block"; }
+    else band.style.display="none";
+  }
+  function updateTimelineSel(){
+    var selKey = selected>=0 ? tlKeyOf(selected) : null;
+    var els=$("timeline").querySelectorAll(".tl-span");
+    for(var i=0;i<els.length;i++){ els[i].classList.toggle("sel", selKey!=null && els[i].dataset.key===selKey); }
+    positionBand();
+  }
+  function setIntervalFilter(aMs,bMs){
+    // keep exact ms in the filter; snap the minute-precision inputs outward to cover the drag
+    filters.tsFrom=aMs; filters.tsTo=bMs;
+    $("tFrom").value=toLocalInput(Math.floor(aMs/60000)*60000);
+    $("tTo").value=toLocalInput(Math.ceil(bMs/60000)*60000);
+    $("tFrom").classList.add("on"); $("tTo").classList.add("on");
+    applyFilters();
+  }
+  (function(){ // drag a region on the timeline -> set the time interval; a click goes to the trace
+    var tl=$("timeline"), dragging=false, startX=0, moved=false, sel=null, originLeft=0, w0=0;
+    tl.addEventListener("mousedown",function(e){
+      if(!tlRange) return;
+      var rect=tl.getBoundingClientRect();
+      originLeft=rect.left; w0=rect.width;
+      startX=Math.max(0,Math.min(w0, e.clientX-originLeft));
+      dragging=true; moved=false;
+      sel=document.createElement("div"); sel.className="tl-sel";
+      sel.style.left=startX+"px"; sel.style.width="0px";
+      tl.appendChild(sel);
+      e.preventDefault();
+    });
+    window.addEventListener("mousemove",function(e){
+      if(!dragging) return;
+      var x=Math.max(0,Math.min(w0, e.clientX-originLeft));
+      if(Math.abs(x-startX)>4) moved=true;
+      if(sel){ sel.style.left=Math.min(startX,x)+"px"; sel.style.width=Math.abs(x-startX)+"px"; }
+    });
+    window.addEventListener("mouseup",function(e){
+      if(!dragging) return;
+      dragging=false;
+      var x=Math.max(0,Math.min(w0, e.clientX-originLeft));
+      if(sel && sel.parentNode){ sel.parentNode.removeChild(sel); } sel=null;
+      if(moved && tlRange){
+        var range=tlRange.t1-tlRange.t0;
+        setIntervalFilter(tlRange.t0+Math.min(startX,x)/w0*range, tlRange.t0+Math.max(startX,x)/w0*range);
+      } else {
+        var el=e.target && e.target.closest ? e.target.closest(".tl-span") : null;
+        if(el) gotoRecord(parseInt(el.dataset.idx,10));
+      }
+    });
+  })();
+  (function(){ // drag the handle below the timeline to resize its height
+    var bar=$("tlResize"), tl=$("timeline"), dragging=false, startY=0, startH=0;
+    bar.addEventListener("mousedown",function(e){
+      dragging=true; startY=e.clientY; startH=tl.offsetHeight;
+      document.body.style.cursor="ns-resize"; e.preventDefault();
+    });
+    window.addEventListener("mousemove",function(e){
+      if(!dragging) return;
+      var h=Math.max(48, Math.min(window.innerHeight*0.6, startH+(e.clientY-startY)));
+      tl.style.height=h+"px";
+    });
+    window.addEventListener("mouseup",function(){ if(dragging){ dragging=false; document.body.style.cursor=""; } });
+  })();
+  // ---------- list columns (built-in + user-defined root-level JSON fields) ----------
+  function buildColHead(){
+    var html=
+      '<div class="c-seq">#<span class="col-rsz" data-var="--c-seq" data-min="36"></span></div>'+
+      '<div class="c-time">time<span class="col-rsz" data-var="--c-time" data-min="70"></span></div>'+
+      '<div class="c-lvl">level<span class="col-rsz" data-var="--c-lvl" data-min="44"></span></div>'+
+      '<div class="c-logger">logger<span class="col-rsz" data-var="--c-logger" data-min="80"></span></div>'+
+      '<div class="c-thread">thread<span class="col-rsz" data-var="--c-thread" data-min="80"></span></div>';
+    customCols.forEach(function(c){
+      html+='<div class="c-custom" style="flex:0 0 var('+c.var+')" title="'+esc(c.path)+'">'+esc(c.label)+
+            '<span class="col-x" data-key="'+esc(c.path)+'" title="Убрать колонку">×</span>'+
+            '<span class="col-rsz" data-var="'+c.var+'" data-min="50"></span></div>';
+    });
+    html+='<div class="c-msg">message</div>';
+    $("colHead").innerHTML=html;
+  }
+  function cellValue(r, path){ // value at a JSON path (flat key or nested); objects shown as compact JSON
+    var v=fieldValue(r, path);
+    if(v===undefined||v===null) return "";
+    if(typeof v==="object"){ try{ return JSON.stringify(v); }catch(e){ return String(v); } }
+    return String(v);
+  }
+  function rootKeys(){ // distinct top-level keys across loaded records (excluding built-in-covered ones)
+    var set={};
+    for(var i=0;i<ALL.length;i++){
+      var o=ALL[i].parsed; if(!o||typeof o!=="object") continue;
+      for(var k in o){ if(Object.prototype.hasOwnProperty.call(o,k) && !COL_EXCLUDE[k]) set[k]=true; }
+    }
+    return Object.keys(set).sort();
+  }
+  function addCustomCol(path, label){
+    if(customCols.some(function(c){return c.path===path;})){ toast("колонка уже есть"); return; }
+    var v="--cc-"+(ccSeq++);
+    document.documentElement.style.setProperty(v,"140px");
+    customCols.push({path:path, label:label||path, var:v});
+    buildColHead(); renderVirtual(false);
+    toast("колонка: "+(label||path));
+  }
+  function removeCustomCol(path){
+    customCols=customCols.filter(function(c){return c.path!==path;});
+    buildColHead(); renderVirtual(false);
+  }
+  function buildColsMenu(){
+    var keys=rootKeys(), active={};
+    customCols.forEach(function(c){ active[c.path]=true; });
+    var html='<h5>колонки · поля JSON корневого уровня</h5>';
+    if(!keys.length) html+='<div class="mini" style="padding:4px 6px">загрузите лог</div>';
+    keys.forEach(function(k){
+      html+='<label><input type="checkbox" data-key="'+esc(k)+'"'+(active[k]?" checked":"")+'> '+esc(k)+'</label>';
+    });
+    $("colsPop").innerHTML=html;
+  }
+  $("colsBtn").onclick=function(){
+    var pop=$("colsPop");
+    if(pop.style.display==="block"){ pop.style.display="none"; return; }
+    buildColsMenu();
+    pop.style.display="block";
+    var r=this.getBoundingClientRect();
+    pop.style.left=Math.max(8, Math.min(r.left, window.innerWidth-pop.offsetWidth-8))+"px";
+    pop.style.top=(r.bottom+4)+"px";
+  };
+  $("colsPop").addEventListener("change",function(e){
+    var cb=e.target.closest && e.target.closest("input[type=checkbox]"); if(!cb) return;
+    if(cb.checked) addCustomCol(cb.dataset.key, cb.dataset.key); else removeCustomCol(cb.dataset.key);
+  });
+  document.addEventListener("mousedown",function(e){ // click outside closes the popover
+    var pop=$("colsPop");
+    if(pop.style.display!=="block") return;
+    if(e.target.closest && (e.target.closest("#colsPop")||e.target.closest("#colsBtn"))) return;
+    pop.style.display="none";
+  });
+  (function(){ // drag header borders to resize columns; × removes a custom column (built-in + custom share this)
+    var root=document.documentElement, vname=null, vmin=40, startX=0, startW=0;
+    $("colHead").addEventListener("mousedown",function(e){
+      var h=e.target.closest && e.target.closest(".col-rsz"); if(!h) return;
+      vname=h.dataset.var; vmin=parseFloat(h.dataset.min)||40; startX=e.clientX;
+      startW=parseFloat(getComputedStyle(root).getPropertyValue(vname))||0;
+      document.body.style.cursor="col-resize"; e.preventDefault();
+    });
+    $("colHead").addEventListener("click",function(e){
+      var x=e.target.closest && e.target.closest(".col-x"); if(!x) return;
+      removeCustomCol(x.dataset.key);
+    });
+    window.addEventListener("mousemove",function(e){
+      if(!vname) return;
+      root.style.setProperty(vname, Math.max(vmin, startW+(e.clientX-startX))+"px");
+    });
+    window.addEventListener("mouseup",function(){ if(vname){ vname=null; document.body.style.cursor=""; } });
+  })();
+  buildColHead();
+
+  // ---------- selection / detail ----------
+  function selectRow(idx){
+    selected=idx; renderVirtual(false); updateTimelineSel(); showDetail(ALL[idx]);
+  }
+  function showDetail(r){
+    detail.classList.remove("hidden");
+    var o=r.parsed||{};
+    $("dLevel").textContent=r.level; $("dLevel").className="lvl-badge badge-"+r.level;
+    $("dLogger").textContent=shortLogger(r.logger);
+    $("dSeq").textContent="#"+r.seq;
+    var b=$("dBody"); b.innerHTML="";
+
+    // time
+    var t=document.createElement("div"); t.className="d-time";
+    t.innerHTML = fmtFull(r) + (r.ts? ' <small>'+esc(r.ts)+'</small>':'');
+    b.appendChild(t);
+
+    // logger (clickable filter)
+    if(r.logger){
+      var lg=document.createElement("div"); lg.className="mini"; lg.style.margin="2px 0 4px";
+      lg.innerHTML='<span class="v click" data-act="logger">'+esc(r.logger)+'</span>';
+      b.appendChild(lg);
+    }
+
+    // exchange (logbook request <-> response pair) — shown above the message
+    var xc = buildExchange(r);
+    if(xc) b.appendChild(xc);
+
+    // message (pretty-print if it is itself JSON)
+    var m=document.createElement("div"); m.className="d-msg";
+    var pj=tryJson(r.msg);
+    m.textContent = pj!==null ? pj : (r.msg||"(empty message)");
+    b.appendChild(m);
+
+    // trace section
+    var traceRows=[];
+    if(o.traceId) traceRows.push(["traceId", o.traceId, "trace", "traceId"]);
+    if(o.spanId) traceRows.push(["spanId", o.spanId, null, "spanId"]);
+    if(o.correlation) traceRows.push(["correlation", o.correlation, null, "correlation"]);
+    if(o.origin) traceRows.push(["origin", o.origin, null, "origin"]);
+    if(o.operation) traceRows.push(["operation", o.operation, null, "operation"]);
+    if(o.duration!==undefined) traceRows.push(["duration", o.duration+" ms", null, "duration"]);
+    if(traceRows.length) b.appendChild(kvSection("trace · context", traceRows, r));
+
+    // header / url / request context — resolve each field by the first existing path (flat MDC key or nested)
+    var hdr=[];
+    function pushField(label, paths){ var f=firstField(r, paths); if(f) hdr.push([label, f.val, null, f.path]); }
+    pushField("url", ["url"]);
+    pushField("method", ["method"]);
+    pushField("client.ip", ["client.ip","header.client.ip"]);
+    pushField("matrix.id", ["matrix.id","header.matrix.id"]);
+    pushField("header.key", ["header.key"]);
+    pushField("traceparent", ["traceparent","header.traceparent"]);
+    pushField("remote", ["remote"]);
+    pushField("protocolVersion", ["protocolVersion"]);
+    if(hdr.length) b.appendChild(kvSection("request", hdr, r));
+
+    // process / thread
+    var proc=[];
+    if(r.thread) proc.push(["thread", r.thread, "thread", "process.thread.name"]);
+    if(o.process && o.process.pid!==undefined) proc.push(["pid", o.process.pid, null, "process.pid"]);
+    if(o.servicesc && o.servicesc.name) proc.push(["service", o.servicesc.name, null, "servicesc.name"]);
+    if(o.tags && o.tags.length) proc.push(["tags", o.tags.join(", "), null]); // array -> substring fallback
+    if(proc.length) b.appendChild(kvSection("process", proc, r));
+
+    // error / stack
+    if(o.error){
+      var h=document.createElement("div"); h.className="sect-h";
+      h.innerHTML = o.error.stack_trace ? 'error<button class="copy" data-act="copystack">copy</button>' : 'error';
+      b.appendChild(h);
+      var ek=kv([["type",o.error.type||"",null,"error.type"],["message",o.error.message||"",null,"error.message"]], r);
+      b.appendChild(ek);
+      if(o.error.stack_trace){
+        var st=document.createElement("div"); st.className="stack";
+        st.innerHTML = formatStack(o.error.stack_trace);
+        b.appendChild(st);
+      }
+    }
+
+    // raw json
+    var rh=document.createElement("div"); rh.className="sect-h";
+    rh.innerHTML='raw<button class="copy" data-act="copyraw">copy</button>';
+    b.appendChild(rh);
+    var raw=document.createElement("div"); raw.className="raw";
+    raw.innerHTML = r.parsed? jsonHighlight(JSON.stringify(r.parsed,null,2)) : esc(r.raw);
+    b.appendChild(raw);
+
+    // wire clickable actions
+    b.querySelectorAll("[data-act]").forEach(function(el){
+      el.onclick=function(){
+        var act=el.dataset.act;
+        if(act==="trace"){ filters.trace=o.traceId; applyFilters(); }
+        else if(act==="logger"){ filters.logger=r.logger; filters.loggerNeg=false; applyFilters(); }
+        else if(act==="thread"){ filters.thread=r.thread; applyFilters(); }
+        else if(act==="copystack"){ copy(o.error.stack_trace); }
+        else if(act==="copyraw"){ copy(r.raw); }
+      };
+    });
+  }
+  // ---------- exchange (logbook request <-> response) ----------
+  function nearestTo(list, r){
+    var best=list[0], bd=Infinity;
+    for(var i=0;i<list.length;i++){
+      var d=Math.abs((ALL[list[i]].tsMs||0)-(r.tsMs||0));
+      if(d<bd){ bd=d; best=list[i]; }
+    }
+    return best;
+  }
+  function gotoRecord(idx){
+    selectRow(idx);
+    var k=VIEW.indexOf(idx);
+    if(k>=0){ centerView(k); vlist.focus(); } // focus the entry (span start) in the list
+    else toast("строка скрыта фильтром");
+  }
+  function centerView(k){
+    var maxTop=Math.max(0, VIEW.length*ROW_H - vlist.clientHeight);
+    vlist.scrollTop=Math.max(0, Math.min(maxTop, k*ROW_H - (vlist.clientHeight-ROW_H)/2));
+    renderVirtual(false);
+  }
+  function buildExchange(r){
+    if(!r.correlation) return null;
+    var idxs = corrIndex.get(r.correlation) || [];
+    if(!idxs.length) return null;
+    var reqs=[], resps=[];
+    idxs.forEach(function(i){
+      var op=String(ALL[i].operation||"").toLowerCase();
+      if(op==="request") reqs.push(i);
+      else if(op==="response") resps.push(i);
+    });
+    if(!reqs.length && !resps.length) return null; // correlation present but no pairable sides
+
+    var reqIdx  = reqs.length  ? nearestTo(reqs, r)  : -1;
+    var respIdx = resps.length ? nearestTo(resps, r) : -1;
+    var reqRec  = reqIdx>=0  ? ALL[reqIdx]  : null;
+    var respRec = respIdx>=0 ? ALL[respIdx] : null;
+
+    // direction is read from the request side's origin (the reliable signal — response.origin
+    // is not consistently the inverse in real logs). Unknown when the request side is missing.
+    var incoming; // undefined -> unknown
+    if(reqRec) incoming = String(reqRec.origin||"").toLowerCase()==="incoming";
+
+    var wrap=document.createElement("div"); wrap.className="xchg";
+
+    // head: direction + latency + isolate
+    var head=document.createElement("div"); head.className="xchg-head";
+    var dir=document.createElement("span"); dir.className="xchg-dir"+(incoming===false?" out":"");
+    dir.textContent = incoming===undefined ? "Обмен" : (incoming?"Входящий":"Исходящий");
+    head.appendChild(dir);
+    if(respRec && respRec.duration!=null && respRec.duration!==""){
+      var lat=document.createElement("span"); lat.className="xchg-lat";
+      lat.textContent=respRec.duration+" ms"; head.appendChild(lat);
+    }
+    var iso=document.createElement("button"); iso.className="xchg-iso";
+    iso.textContent="изолировать"; iso.title="Показать в списке только записи этого обмена";
+    iso.onclick=function(){ filters.correlation=r.correlation; applyFilters(); };
+    head.appendChild(iso);
+    wrap.appendChild(head);
+
+    // cards
+    var cards=document.createElement("div"); cards.className="xchg-cards";
+    function bodyText(rec){
+      var t = rec.msg!=null ? String(rec.msg) : "";
+      if(!t.length) return "(пусто)";
+      var pj=tryJson(t); return pj!==null ? pj : t;
+    }
+    function meta(c,k,v){
+      var d=document.createElement("div"); d.className="xchg-meta";
+      d.innerHTML='<span class="k">'+esc(k)+': </span>'+esc(v); c.appendChild(d);
+    }
+    function dataCard(label, i, isResp){
+      var rec=ALL[i];
+      var c=document.createElement("div"); c.className="xchg-card"+(i===selected?" cur":"");
+      var ttl=document.createElement("div"); ttl.className="ttl";
+      ttl.textContent=label+(i===selected?" · текущая":""); c.appendChild(ttl);
+      if(rec.url) meta(c,"url",rec.url);
+      if(rec.parsed && rec.parsed.header && rec.parsed.header.key) meta(c,"key",rec.parsed.header.key);
+      if(isResp && rec.duration!=null && rec.duration!=="") meta(c,"duration",rec.duration+" ms");
+      var body=document.createElement("div"); body.className="xchg-bodytext";
+      body.textContent=bodyText(rec); c.appendChild(body);
+      return c;
+    }
+    function missingCard(label){
+      var c=document.createElement("div"); c.className="xchg-card";
+      var ttl=document.createElement("div"); ttl.className="ttl"; ttl.textContent=label; c.appendChild(ttl);
+      var note=document.createElement("div"); note.className="xchg-note";
+      note.textContent="вторая сторона обмена не найдена в загруженном логе"; c.appendChild(note);
+      return c;
+    }
+    if(reqs.length) reqs.forEach(function(i,n){ cards.appendChild(dataCard(reqs.length>1?("REQUEST #"+(n+1)):"REQUEST", i, false)); });
+    else cards.appendChild(missingCard("REQUEST"));
+    if(resps.length) resps.forEach(function(i,n){ cards.appendChild(dataCard(resps.length>1?("RESPONSE #"+(n+1)):"RESPONSE", i, true)); });
+    else cards.appendChild(missingCard("RESPONSE"));
+    wrap.appendChild(cards);
+
+    // nav buttons; the side the user is already on is disabled
+    var curOp=String(r.operation||"").toLowerCase();
+    var nav=document.createElement("div"); nav.className="xchg-nav";
+    var bReq=document.createElement("button"); bReq.textContent="→ Запрос";
+    if(reqIdx<0){ bReq.disabled=true; bReq.title="нет записи запроса в логе"; }
+    else if(curOp==="request"){ bReq.disabled=true; }
+    else bReq.onclick=function(){ gotoRecord(reqIdx); };
+    var bResp=document.createElement("button"); bResp.textContent="→ Ответ";
+    if(respIdx<0){ bResp.disabled=true; bResp.title="нет записи ответа в логе"; }
+    else if(curOp==="response"){ bResp.disabled=true; }
+    else bResp.onclick=function(){ gotoRecord(respIdx); };
+    nav.appendChild(bReq); nav.appendChild(bResp);
+    wrap.appendChild(nav);
+
+    return wrap;
+  }
+
+  function kvSection(title, rows, rec){
+    var frag=document.createDocumentFragment();
+    var h=document.createElement("div"); h.className="sect-h"; h.textContent=title; frag.appendChild(h);
+    frag.appendChild(kv(rows, rec));
+    var wrap=document.createElement("div"); wrap.appendChild(frag); return wrap;
+  }
+  function kv(rows, rec){
+    var g=document.createElement("div"); g.className="kv";
+    rows.forEach(function(row){
+      var k=document.createElement("div"); k.className="k"; k.textContent=row[0];
+      var v=document.createElement("div"); v.className="v"+(row[2]?" click":""); v.textContent=row[1];
+      if(row[2]) v.dataset.act=row[2];
+      if(row[1]!=null && row[1]!==""){
+        var fb=document.createElement("button"); fb.className="kv-f"; fb.type="button";
+        fb.textContent="⊕"; fb.title="Фильтр по этому полю = значение";
+        fb.onclick=(function(label,path,val){ return function(e){
+          e.stopPropagation();
+          if(path) addFieldFilter(path, label, rec); else addToQuery(val); // tags etc. have no path -> substring
+        }; })(row[0], row[3], row[1]);
+        v.appendChild(fb);
+      }
+      if(row[3]){ // field has a known path -> can be shown as a list column
+        var cb=document.createElement("button"); cb.className="kv-f"; cb.type="button";
+        cb.textContent="▦"; cb.title="Вывести поле в список как колонку";
+        cb.onclick=(function(label,path){ return function(e){ e.stopPropagation(); addCustomCol(path, label); }; })(row[0], row[3]);
+        v.appendChild(cb);
+      }
+      g.appendChild(k); g.appendChild(v);
+    });
+    return g;
+  }
+  function fieldValue(r, path){ // value of a JSON field; tries a flat key first (MDC dotted keys), then nested
+    var o=r.parsed; if(!o||typeof o!=="object") return undefined;
+    if(Object.prototype.hasOwnProperty.call(o, path)) return o[path];
+    return pick(o, [path]);
+  }
+  function firstField(r, paths){ // first present scalar among candidate paths -> {val, path}
+    for(var i=0;i<paths.length;i++){
+      var v=fieldValue(r, paths[i]);
+      if(v!==undefined && v!==null && v!=="" && typeof v!=="object") return {val:String(v), path:paths[i]};
+    }
+    return null;
+  }
+  function addFieldFilter(path, label, rec){
+    var v=fieldValue(rec, path);
+    if(v===undefined || v===null || v==="" || typeof v==="object"){ toast("нет значения для фильтра"); return; }
+    v=String(v);
+    if(filters.fields.some(function(f){return f.path===path && f.val===v && f.op==="eq";})) return; // already active
+    filters.fields.push({path:path, label:label||path, val:v, op:"eq"});
+    applyFilters();
+    toast((label||path)+" = "+(v.length>30? v.slice(0,30)+"…":v));
+  }
+  function cycleFieldOp(f){ // = -> ≠ -> пусто -> непусто -> =
+    var order=["eq","ne","empty","nonempty"];
+    f.op=order[(order.indexOf(f.op)+1)%order.length];
+    applyFilters();
+  }
+  function addToQuery(val){
+    val=String(val);
+    $("q").value=val; filters.q=val;
+    if(filters.regex){ filters.regex=false; $("reToggle").classList.remove("on"); } // value is literal, not a pattern
+    applyFilters();
+    toast("поиск: "+(val.length>40? val.slice(0,40)+"…" : val));
+  }
+  $("dClose").onclick=function(){ detail.classList.add("hidden"); selected=-1; renderVirtual(false); updateTimelineSel(); };
+
+  // ---------- helpers ----------
+  function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];}); }
+  function shortLogger(s){
+    if(!s) return "";
+    if(s.length<=34) return s;
+    var p=s.split("."); if(p.length<=2) return s;
+    // abbreviate leading packages: ru.otpbank.kc.acd.x.Y -> r.o.k.a.x.Y, keep last 2 full
+    var head=p.slice(0,-2).map(function(x){return x.charAt(0);}).join(".");
+    return head+"."+p.slice(-2).join(".");
+  }
+  function shortType(t){ if(!t) return ""; var p=t.split("."); return p[p.length-1]; }
+  function fmtTime(r){
+    if(isNaN(r.tsMs)) return "";
+    var d=new Date(r.tsMs);
+    return pad(d.getHours())+":"+pad(d.getMinutes())+":"+pad(d.getSeconds())+"."+pad3(d.getMilliseconds());
+  }
+  function fmtFull(r){
+    if(isNaN(r.tsMs)) return r.ts||"(no timestamp)";
+    var d=new Date(r.tsMs);
+    return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate())+" "+
+           pad(d.getHours())+":"+pad(d.getMinutes())+":"+pad(d.getSeconds())+"."+pad3(d.getMilliseconds());
+  }
+  function pad(n){return n<10?"0"+n:""+n;}
+  function pad3(n){return n<10?"00"+n:n<100?"0"+n:""+n;}
+  function fmtMs(ms){
+    var d=new Date(ms);
+    return pad(d.getHours())+":"+pad(d.getMinutes())+":"+pad(d.getSeconds());
+  }
+  function tryJson(s){
+    if(typeof s!=="string") return null; var t=s.trim();
+    if(!(t.charAt(0)==="{"||t.charAt(0)==="[")) return null;
+    try{ return JSON.stringify(JSON.parse(t),null,2); }catch(e){ return null; }
+  }
+  function hl(text, qc){
+    var safe=esc(text);
+    if(!qc) return safe;
+    try{
+      if(qc.sub){
+        var re=new RegExp(qc.sub.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"),"gi");
+        return safe.replace(re,function(m){return "<mark>"+m+"</mark>";});
+      }
+      if(qc.re){ return safe.replace(new RegExp(qc.re.source,"gi"),function(m){return m?"<mark>"+m+"</mark>":m;}); }
+    }catch(e){}
+    return safe;
+  }
+  function formatStack(s){
+    // normalize CRLF/CR -> LF; a stray \r in white-space:pre renders as an extra blank line
+    return esc(s).split(/\r\n|\r|\n/).map(function(l){
+      return /^\s*at\s/.test(l)? '<span class="at">'+l+'</span>' : l;
+    }).join("\n");
+  }
+  function jsonHighlight(s){
+    return esc(s)
+      .replace(/(&quot;(?:[^&]|&(?!quot;))*?&quot;)(\s*:)/g,'<span class="jk">$1</span>$2')
+      .replace(/:\s*(&quot;(?:[^&]|&(?!quot;))*?&quot;)/g,': <span class="js">$1</span>')
+      .replace(/:\s*(-?\d+\.?\d*)/g,': <span class="jn">$1</span>')
+      .replace(/:\s*(true|false|null)/g,': <span class="jb">$1</span>');
+  }
+  function copy(text){
+    try{
+      navigator.clipboard.writeText(text).then(function(){toast("copied");},function(){fallbackCopy(text);});
+    }catch(e){ fallbackCopy(text); }
+  }
+  function fallbackCopy(text){
+    var ta=document.createElement("textarea"); ta.value=text; document.body.appendChild(ta);
+    ta.select(); try{document.execCommand("copy");toast("copied");}catch(e){} document.body.removeChild(ta);
+  }
+  var toastT;
+  function toast(msg){ var t=$("toast"); t.textContent=msg; t.classList.add("show"); clearTimeout(toastT); toastT=setTimeout(function(){t.classList.remove("show");},1200); }
+
+  // ---------- issue navigation ----------
+  function jumpIssue(dir){
+    if(!VIEW.length) return;
+    var cur = selected>=0? VIEW.indexOf(selected) : (dir>0?-1:VIEW.length);
+    for(var k=cur+dir; k>=0 && k<VIEW.length; k+=dir){
+      var r=ALL[VIEW[k]];
+      if(r.level==="WARN"||r.level==="ERROR"){ selectRow(VIEW[k]); scrollToView(k); return; }
+    }
+    toast("no more WARN/ERROR");
+  }
+  function scrollToView(k){
+    var top=k*ROW_H, bottom=top+ROW_H;
+    if(top<vlist.scrollTop) vlist.scrollTop=top-ROW_H*3;
+    else if(bottom>vlist.scrollTop+vlist.clientHeight) vlist.scrollTop=bottom-vlist.clientHeight+ROW_H*3;
+    renderVirtual(false);
+  }
+
+  // ---------- export ----------
+  $("exportBtn").onclick=function(){
+    if(!VIEW.length){ toast("nothing to export"); return; }
+    var text=VIEW.map(function(i){return ALL[i].raw;}).join("\n")+"\n";
+    var blob=new Blob([text],{type:"application/x-ndjson"});
+    var a=document.createElement("a"); a.href=URL.createObjectURL(blob);
+    a.download="filtered-"+VIEW.length+"-lines.log"; a.click();
+    setTimeout(function(){URL.revokeObjectURL(a.href);},2000);
+    toast("exported "+VIEW.length+" lines");
+  };
+
+  // ---------- search input ----------
+  var qT;
+  $("q").addEventListener("input", function(e){
+    filters.q=e.target.value; clearTimeout(qT); qT=setTimeout(applyFilters,120);
+  });
+  $("reToggle").onclick=function(){
+    filters.regex=!filters.regex; this.classList.toggle("on",filters.regex); applyFilters();
+  };
+
+  // ---------- time-range filter ---------- (pad() is the shared helper defined below)
+  function toLocalInput(ms){ // minute precision — matches the datetime-local inputs (no seconds)
+    var d=new Date(ms);
+    return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate())+"T"+
+           pad(d.getHours())+":"+pad(d.getMinutes());
+  }
+  function onTimeInput(){
+    var f=$("tFrom").value, t=$("tTo").value;
+    filters.tsFrom = f ? new Date(f).getTime() : null;
+    filters.tsTo   = t ? new Date(t).getTime() : null;
+    $("tFrom").classList.toggle("on", filters.tsFrom!=null);
+    $("tTo").classList.toggle("on", filters.tsTo!=null);
+    applyFilters();
+  }
+  function setupTimeBounds(){
+    // reset any carried-over interval, then set the native picker bounds to the data's span
+    $("tFrom").value=""; $("tTo").value="";
+    filters.tsFrom=null; filters.tsTo=null;
+    $("tFrom").classList.remove("on"); $("tTo").classList.remove("on");
+    var lo=Infinity, hi=-Infinity;
+    for(var i=0;i<ALL.length;i++){ var t=ALL[i].tsMs; if(!isNaN(t)){ if(t<lo)lo=t; if(t>hi)hi=t; } }
+    if(lo<=hi){
+      var min=toLocalInput(lo), max=toLocalInput(hi);
+      $("tFrom").min=min; $("tFrom").max=max;
+      $("tTo").min=min;   $("tTo").max=max;
+    } else {
+      ["tFrom","tTo"].forEach(function(id){ $(id).removeAttribute("min"); $(id).removeAttribute("max"); });
+    }
+  }
+  function clearTimeFilter(){
+    $("tFrom").value=""; $("tTo").value="";
+    filters.tsFrom=null; filters.tsTo=null;
+    $("tFrom").classList.remove("on"); $("tTo").classList.remove("on");
+    applyFilters();
+  }
+  $("tFrom").addEventListener("change", onTimeInput);
+  $("tFrom").addEventListener("input", onTimeInput);
+  $("tTo").addEventListener("change", onTimeInput);
+  $("tTo").addEventListener("input", onTimeInput);
+  $("tClear").onclick=clearTimeFilter;
+
+  // ---------- file open / drag / paste ----------
+  $("openBtn").onclick=function(){$("fileInput").click();};
+  $("dropOpen").onclick=function(){$("fileInput").click();};
+  $("fileInput").onchange=function(e){ if(e.target.files.length) loadFiles(e.target.files); };
+  ["dragenter","dragover"].forEach(function(ev){
+    window.addEventListener(ev,function(e){e.preventDefault(); if(drop.style.display!=="none") drop.classList.add("dragover");});
+  });
+  ["dragleave","drop"].forEach(function(ev){
+    window.addEventListener(ev,function(e){e.preventDefault(); drop.classList.remove("dragover");});
+  });
+  window.addEventListener("drop",function(e){
+    e.preventDefault();
+    if(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) loadFiles(e.dataTransfer.files);
+  });
+  window.addEventListener("paste",function(e){
+    var t=(e.clipboardData||window.clipboardData).getData("text");
+    if(t && t.indexOf("{")>=0 && t.length>40){ loadText(t,"pasted"); }
+  });
+
+  // ---------- keyboard ----------
+  document.addEventListener("keydown",function(e){
+    if(e.target.tagName==="INPUT" && e.key!=="Escape") {
+      if(e.key==="Enter"){ e.target.blur(); }
+      return;
+    }
+    if(e.key==="/"){ e.preventDefault(); $("q").focus(); $("q").select(); }
+    else if(e.key==="Escape"){
+      if($("colsPop").style.display==="block"){ $("colsPop").style.display="none"; }
+      else if(filters.correlation){filters.correlation=null;applyFilters();}
+      else if(filters.tsFrom!=null||filters.tsTo!=null){clearTimeFilter();}
+      else if(filters.trace){filters.trace=null;applyFilters();}
+      else if(!detail.classList.contains("hidden")){$("dClose").click();}
+    }
+    else if(e.key==="ArrowDown"||e.key==="j"){ e.preventDefault(); moveSel(1); }
+    else if(e.key==="ArrowUp"||e.key==="k"){ e.preventDefault(); moveSel(-1); }
+    else if(e.key==="N"&&e.shiftKey){ jumpIssue(1); }
+    else if(e.key==="P"&&e.shiftKey){ jumpIssue(-1); }
+  });
+  $("nextHit").onclick=function(){jumpIssue(1);};
+  $("prevHit").onclick=function(){jumpIssue(-1);};
+  function moveSel(dir){
+    if(!VIEW.length) return;
+    var cur = selected>=0? VIEW.indexOf(selected) : -1;
+    var nk = cur<0 ? (dir>0?0:VIEW.length-1) : Math.max(0,Math.min(VIEW.length-1,cur+dir));
+    selectRow(VIEW[nk]); scrollToView(nk);
+  }
+
+  // ---------- resizable detail panel ----------
+  (function(){
+    var dragging=false, startX, startW;
+    var bar=$("dragbar");
+    bar.addEventListener("mousedown",function(e){
+      if(detail.classList.contains("hidden")) return;
+      dragging=true; startX=e.clientX; startW=detail.offsetWidth;
+      document.body.style.cursor="col-resize"; e.preventDefault();
+    });
+    window.addEventListener("mousemove",function(e){
+      if(!dragging) return;
+      var w=startW+(startX-e.clientX);
+      w=Math.max(320,Math.min(window.innerWidth*0.7,w));
+      detail.style.flexBasis=w+"px"; renderVirtual(false);
+    });
+    window.addEventListener("mouseup",function(){ dragging=false; document.body.style.cursor=""; });
+  })();
+
+})();
+</script>
+</body>
+</html>
